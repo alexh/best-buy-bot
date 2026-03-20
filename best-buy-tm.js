@@ -18,8 +18,9 @@
  
  //____ REQUIRED FLAGS ____________________________________________________
  
-const ITEM_KEYWORD= "5090"; // NO SPACES IN KEYWORD - ONLY ONE WORD
+const ITEM_KEYWORD= "5090"; // Comma-separated keywords, every term must match. Example: "ASUS,5090"
 const CREDITCARD_CVV = "***"; // BOT will run without changing this value.
+const BEST_BUY_PASSWORD = "REPLACE_IN_LOCAL_ENV";
 const TESTMODE = "Yes"; // TESTMODE = "No" will buy the card
 const SMS_DIGITS = "1111"; // Enter last 4 digits of phone # for SMS verification (required for verification)
 const PREFERRED_SHIPPING = "Yes" // "Yes" will select shipping option if available
@@ -57,6 +58,20 @@ const SOUND_FILES = {
  //________________________________________________________________________
  
 const playedSoundGuards = new Set();
+let activeAudio = null;
+const REQUIRED_KEYWORDS = String(ITEM_KEYWORD)
+    .split(",")
+    .map((keyword) => keyword.trim().toLowerCase())
+    .filter(Boolean);
+
+function matchesRequiredKeywords(text) {
+    if (!REQUIRED_KEYWORDS.length) {
+        return true;
+    }
+
+    const normalizedText = String(text || "").toLowerCase();
+    return REQUIRED_KEYWORDS.every((keyword) => normalizedText.includes(keyword));
+}
 
 function playSound(eventName, guardKey = "") {
     if (SOUND_ENABLED !== "Yes") {
@@ -76,8 +91,28 @@ function playSound(eventName, guardKey = "") {
         playedSoundGuards.add(guardKey);
     }
 
+    if (activeAudio) {
+        activeAudio.pause();
+        activeAudio.currentTime = 0;
+        activeAudio = null;
+    }
+
     const audio = new Audio(`${SOUND_BASE_URL}/${soundFile}`);
-    audio.play().catch((err) => console.error("Audio play failed:", err));
+    activeAudio = audio;
+    audio.addEventListener("ended", () => {
+        if (activeAudio === audio) {
+            activeAudio = null;
+        }
+    }, { once: true });
+    audio.play().catch((err) => {
+        if (activeAudio === audio) {
+            activeAudio = null;
+        }
+        if (err?.name === "NotAllowedError") {
+            return;
+        }
+        console.error("Audio play failed:", err);
+    });
 }
  
  //________________________________________________________________________
@@ -132,6 +167,13 @@ function getSkuFromPage() {
         return urlSku;
     }
 
+    const cartSku = Array.from(document.querySelectorAll("section.card[data-test-sku], .fluid-item[data-test-sku]"))
+        .find((element) => matchesRequiredKeywords(element.textContent || ""))
+        ?.getAttribute("data-test-sku");
+    if (cartSku) {
+        return cartSku;
+    }
+
     const bodySku = document.body?.innerText?.match(/SKU:\s*(\d{6,})/i)?.[1];
     if (bodySku) {
         return bodySku;
@@ -165,8 +207,93 @@ function getShippingOption() {
     return shippingLabel?.closest('[role="radio"]') ?? shippingLabel ?? null;
 }
 
+function getPdpShippingLabel() {
+    const shippingSelector = sku
+        ? `[data-testid="pdp-shipping-${sku}"]`
+        : '[data-testid^="pdp-shipping-"]';
+
+    return Array.from(document.querySelectorAll(shippingSelector))
+        .find((element) => isVisible(element)) ?? null;
+}
+
+function ensureSku() {
+    if (sku) {
+        return sku;
+    }
+
+    sku = getSkuFromPage();
+    console.log("refreshed sku", sku);
+    return sku;
+}
+
+function getTargetCartTitleElement() {
+    ensureSku();
+
+    if (sku) {
+        const skuContainer = document.querySelector(`section.card[data-test-sku="${sku}"], .fluid-item[data-test-sku="${sku}"]`);
+        const skuTitle = skuContainer?.querySelector(".cart-item__title, .location-fulfillment-item__title");
+        if (skuTitle) {
+            return skuTitle;
+        }
+    }
+
+    return Array.from(document.querySelectorAll(".cart-item__title, .location-fulfillment-item__title, a, div"))
+        .find((element) => {
+            if (!isVisible(element)) {
+                return false;
+            }
+
+            const text = (element.textContent || "").trim();
+            return text.length > 0 && matchesRequiredKeywords(text);
+        }) || null;
+}
+
+function getTargetCartItemContainer() {
+    ensureSku();
+
+    if (sku) {
+        const skuContainer = document.querySelector(`section.card[data-test-sku="${sku}"], .fluid-item[data-test-sku="${sku}"]`);
+        if (skuContainer) {
+            return skuContainer;
+        }
+    }
+
+    const titleElement = getTargetCartTitleElement();
+    if (!titleElement) {
+        return null;
+    }
+
+    let current = titleElement;
+    while (current && current !== document.body) {
+        const text = (current.textContent || "").toLowerCase();
+        if (text.includes("pickup") || text.includes("shipping")) {
+            return current;
+        }
+        current = current.parentElement;
+    }
+
+    return titleElement.parentElement || null;
+}
+
+function getCartLineItems() {
+    return Array.from(document.querySelectorAll("section.card[data-test-sku], .fluid-item[data-test-sku]"));
+}
+
+function getMatchingCartLineItems() {
+    return getCartLineItems().filter((element) => matchesRequiredKeywords(element.textContent || ""));
+}
+
+function isCartCleanForCheckout() {
+    const cartLineItems = getCartLineItems();
+    const matchingItems = getMatchingCartLineItems();
+
+    return cartLineItems.length === 1 && matchingItems.length === 1;
+}
+
 function getCartShippingEntry() {
-    return Array.from(document.querySelectorAll(".availability__entry"))
+    const searchRoot = getTargetCartItemContainer() || document;
+
+    return Array.from(searchRoot.querySelectorAll(".availability__entry"))
         .find((element) => {
             const text = (element.textContent || "").trim().toLowerCase();
             return text.includes("free shipping") || text.includes("shipping to");
@@ -184,18 +311,20 @@ function getCartShippingOption() {
         );
     }
 
-    const shippingInput = Array.from(document.querySelectorAll("input[id^='fulfillment-shipping-']"))
+    const searchRoot = getTargetCartItemContainer() || document;
+
+    const shippingInput = Array.from(searchRoot.querySelectorAll("input[id^='fulfillment-shipping-']"))
         .find((element) => isVisible(element) || element.offsetParent !== null);
     if (shippingInput) {
         return (
-            document.querySelector(`label[for="${shippingInput.id}"]`) ||
+            searchRoot.querySelector(`label[for="${shippingInput.id}"]`) ||
             shippingInput.closest("label") ||
             shippingInput.closest('[role="radio"]') ||
             shippingInput
         );
     }
 
-    const shippingRadio = Array.from(document.querySelectorAll('[role="radio"], label, button, div'))
+    const shippingRadio = Array.from(searchRoot.querySelectorAll('[role="radio"], label, button, div'))
         .find((element) => {
             if (!isVisible(element)) {
                 return false;
@@ -217,21 +346,40 @@ function getCartShippingOption() {
 }
 
 function isPdpShippingSelected() {
+    const shippingLabel = getPdpShippingLabel();
     const shippingOption = getShippingOption();
-    if (!shippingOption) {
+
+    if (!shippingLabel && !shippingOption) {
         return false;
     }
 
-    return shippingOption.getAttribute("aria-checked") === "true";
+    const selectedRadio = shippingLabel?.closest('[role="radio"][aria-checked="true"]');
+    if (selectedRadio) {
+        return true;
+    }
+
+    if (shippingOption?.getAttribute("aria-checked") === "true") {
+        return true;
+    }
+
+    const selectedContainer =
+        shippingLabel?.closest(".border-selected") ||
+        shippingLabel?.closest(".border-comp-outline-primary") ||
+        shippingOption?.closest?.(".border-selected") ||
+        shippingOption?.closest?.(".border-comp-outline-primary");
+
+    return Boolean(selectedContainer);
 }
 
 function isCartShippingSelected() {
-    const selectedShippingInput = document.querySelector("input[id^='fulfillment-shipping-']:checked");
+    const searchRoot = getTargetCartItemContainer() || document;
+
+    const selectedShippingInput = searchRoot.querySelector("input[id^='fulfillment-shipping-']:checked");
     if (selectedShippingInput) {
         return true;
     }
 
-    const selectedShippingEntry = Array.from(document.querySelectorAll(".availability__entry"))
+    const selectedShippingEntry = Array.from(searchRoot.querySelectorAll(".availability__entry"))
         .find((element) => {
             const text = (element.textContent || "").trim().toLowerCase();
             const input = element.querySelector("input[id^='fulfillment-shipping-']");
@@ -246,11 +394,62 @@ function clickElement(element) {
         return;
     }
 
+    try {
+        if (typeof element.scrollIntoView === "function") {
+            element.scrollIntoView({ block: "center", inline: "center" });
+        }
+    } catch (error) {
+        console.warn("scrollIntoView failed", error);
+    }
+
+    try {
+        if (typeof element.focus === "function") {
+            element.focus({ preventScroll: true });
+        }
+    } catch (error) {
+        console.warn("focus failed", error);
+    }
+
     ["pointerdown", "mousedown", "pointerup", "mouseup", "click"].forEach((eventName) => {
-        element.dispatchEvent(new MouseEvent(eventName, {
+        try {
+            const EventCtor = eventName.startsWith("pointer") && typeof window.PointerEvent === "function"
+                ? window.PointerEvent
+                : window.MouseEvent;
+            element.dispatchEvent(new EventCtor(eventName, {
+                bubbles: true,
+                cancelable: true,
+                view: window,
+                button: 0,
+                buttons: 1
+            }));
+        } catch (error) {
+            console.warn(`Synthetic ${eventName} failed`, error);
+        }
+    });
+
+}
+
+function activateRadioElement(element) {
+    if (!element) {
+        return;
+    }
+
+    if (typeof element.focus === "function") {
+        element.focus();
+    }
+
+    [" ", "Enter"].forEach((key) => {
+        element.dispatchEvent(new KeyboardEvent("keydown", {
+            key,
+            code: key === " " ? "Space" : "Enter",
             bubbles: true,
-            cancelable: true,
-            view: window
+            cancelable: true
+        }));
+        element.dispatchEvent(new KeyboardEvent("keyup", {
+            key,
+            code: key === " " ? "Space" : "Enter",
+            bubbles: true,
+            cancelable: true
         }));
     });
 }
@@ -303,6 +502,150 @@ function getAddress2Input() {
         document.querySelector("input[autocomplete='address-line2']") ||
         null
     );
+}
+
+function getPasswordInput() {
+    return (
+        document.getElementById("fld-p1") ||
+        document.querySelector('input[type="password"]') ||
+        document.querySelector('input[name="fld-p1"]') ||
+        document.querySelector('input[name="password"]') ||
+        document.getElementById("password") ||
+        null
+    );
+}
+
+function getContinueButton() {
+    return (
+        Array.from(document.querySelectorAll("button")).find((button) =>
+            isVisible(button) &&
+            !button.disabled &&
+            (button.textContent || "").trim().toLowerCase() === "continue"
+        ) ||
+        document.querySelector('button[type="submit"]') ||
+        null
+    );
+}
+
+function getSignInButton() {
+    return (
+        Array.from(document.querySelectorAll("button")).find((button) => {
+            if (!isVisible(button) || button.disabled) {
+                return false;
+            }
+
+            const text = (button.textContent || "").trim().toLowerCase();
+            return text === "sign in";
+        }) ||
+        document.getElementsByClassName("c-button c-button-secondary c-button-lg c-button-block c-button-icon c-button-icon-leading cia-form__controls__submit")[0] ||
+        null
+    );
+}
+
+function selectPasswordSignInMethod() {
+    const passwordRadio =
+        document.getElementById("password-radio") ||
+        document.querySelector('input[type="radio"][name="signin-option-radio"][value="password"]');
+    const passwordLabel = passwordRadio?.id
+        ? document.querySelector(`label[for="${passwordRadio.id}"]`)
+        : null;
+    const passwordOption =
+        passwordLabel ||
+        passwordRadio?.closest(".c-radio-wrapper") ||
+        passwordRadio?.closest('[role="radio"]') ||
+        Array.from(document.querySelectorAll('[role="radio"], label, button, div'))
+            .find((element) => {
+                if (!isVisible(element)) {
+                    return false;
+                }
+
+                const text = (element.textContent || "").trim().toLowerCase();
+                return text === "use password" || text.startsWith("use password");
+            }) ||
+        null;
+
+    if (passwordRadio?.checked || getPasswordInput()) {
+        return true;
+    }
+
+    if (!passwordOption && !passwordRadio) {
+        return false;
+    }
+
+    if (passwordLabel) {
+        clickElement(passwordLabel);
+    }
+
+    if (passwordOption && passwordOption !== passwordLabel) {
+        clickElement(passwordOption);
+    }
+
+    if (passwordRadio) {
+        clickElement(passwordRadio);
+        setRadioChecked(passwordRadio);
+    }
+
+    const radioTarget = passwordOption?.matches?.('[role="radio"]')
+        ? passwordOption
+        : passwordRadio?.closest('[role="radio"]');
+    if (radioTarget) {
+        activateRadioElement(radioTarget);
+    }
+
+    return Boolean(passwordRadio?.checked || getPasswordInput());
+}
+
+function fillPasswordAndContinue() {
+    if (!BEST_BUY_PASSWORD || BEST_BUY_PASSWORD === "REPLACE_IN_LOCAL_ENV") {
+        console.log("BEST_BUY_PASSWORD is not configured. Leaving sign-in to manual or saved credentials.");
+        return false;
+    }
+
+    const passwordInput = getPasswordInput();
+    if (!passwordInput) {
+        console.log("Password input not found on sign-in page");
+        return false;
+    }
+
+    setInputValue(passwordInput, BEST_BUY_PASSWORD);
+
+    const continueButton = getContinueButton();
+    if (!continueButton) {
+        console.log("Continue button not found on sign-in page");
+        return false;
+    }
+
+    clickElement(continueButton);
+    console.log("Filled password and clicked Continue");
+    return true;
+}
+
+function runSignInFlow(attempt = 1) {
+    const canAutofillPassword = BEST_BUY_PASSWORD && BEST_BUY_PASSWORD !== "REPLACE_IN_LOCAL_ENV";
+
+    if (canAutofillPassword && fillPasswordAndContinue()) {
+        return;
+    }
+
+    if (canAutofillPassword && selectPasswordSignInMethod()) {
+        if (attempt < 12) {
+            setTimeout(function() {
+                runSignInFlow(attempt + 1);
+            }, 400);
+        }
+        return;
+    }
+
+    const signInButton = getSignInButton();
+    if (signInButton) {
+        clickElement(signInButton);
+    }
+
+    if (attempt < 12) {
+        setTimeout(function() {
+            runSignInFlow(attempt + 1);
+        }, 800);
+    }
 }
 
 function fillShippingAddressForm() {
@@ -360,6 +703,36 @@ function clickApplyShippingAddress() {
     return true;
 }
 
+function getFulfillmentContinueButton() {
+    return (
+        Array.from(document.querySelectorAll("button")).find((button) => {
+            if (!isVisible(button) || button.disabled) {
+                return false;
+            }
+
+            const text = (button.textContent || "").trim().toLowerCase();
+            return text.includes("continue to payment information");
+        }) || null
+    );
+}
+
+function clickFulfillmentContinueButton() {
+    const continueButton = getFulfillmentContinueButton();
+    if (!continueButton) {
+        console.log("Continue to Payment Information button not found");
+        return false;
+    }
+
+    clickElement(continueButton);
+    const buttonLabel = continueButton.querySelector("span");
+    if (buttonLabel) {
+        clickElement(buttonLabel);
+    }
+
+    console.log("Clicked Continue to Payment Information");
+    return true;
+}
+
 function fillAndApplyShippingAddress(onComplete) {
     const filled = fillShippingAddressForm();
     if (!filled) {
@@ -371,6 +744,51 @@ function fillAndApplyShippingAddress(onComplete) {
         const applied = clickApplyShippingAddress();
         onComplete?.(applied);
     }, 600);
+}
+
+function runFulfillmentCheckoutFlow(attempt = 1) {
+    const hasShippingAddressForm =
+        Boolean(document.querySelector(".shipping-location-address-container .address-form")) &&
+        Boolean(document.getElementById("firstName"));
+
+    const retryContinue = function() {
+        const clickedContinue = clickFulfillmentContinueButton();
+        if (!clickedContinue) {
+            if (attempt < 15) {
+                setTimeout(function() {
+                    runFulfillmentCheckoutFlow(attempt + 1);
+                }, 1000);
+            }
+            return;
+        }
+
+        setTimeout(function() {
+            if (!location.href.includes("/checkout/r/fulfillment") && !location.href.includes("/checkout/c/fulfillment")) {
+                console.log("Fulfillment step completed");
+                return;
+            }
+
+            if (attempt < 15) {
+                console.log("Still on fulfillment page after Continue click. Retrying.");
+                runFulfillmentCheckoutFlow(attempt + 1);
+            }
+        }, 1500);
+    };
+
+    if (hasShippingAddressForm) {
+        fillAndApplyShippingAddress(function(applied) {
+            if (applied) {
+                console.log("Shipping address applied on fulfillment page");
+            }
+
+            setTimeout(function() {
+                retryContinue();
+            }, 1200);
+        });
+        return;
+    }
+
+    retryContinue();
 }
 
 function getAddToCartButton() {
@@ -401,21 +819,32 @@ function getAddToCartButton() {
      return (
          Array.from(document.querySelectorAll("a, button")).find((element) => {
              const text = (element.textContent || "").trim().toLowerCase();
-             const href = element.getAttribute("href") || "";
-             return text.includes("go to cart") || href === "/cart" || href === "https://www.bestbuy.com/cart";
+             return text === "go to cart" || text.includes("go to cart");
          }) || null
      );
  }
  
 function clickShippingThenAddToCart() {
-     ensureShippingSelected("pdp", function(selected) {
-         if (!selected) {
-             console.log("PDP shipping selection did not stick");
-         }
+    if (PREFERRED_SHIPPING === "Yes") {
+        console.log("Skipping PDP shipping selection. Shipping will be enforced on the cart page.");
+    } else {
+        console.log("PREFERRED_SHIPPING is not enabled. Preserving current fulfillment.");
+    }
 
-         waitForAddToCartAndClick();
-     });
- }
+    waitForAddToCartAndClick();
+}
+
+function proceedToCheckoutFromCart() {
+    setTimeout(() => {
+        const checkoutButton = getCheckoutButton();
+        if (checkoutButton) {
+            console.log("Clicking Checkout");
+            checkoutButton.click();
+        } else {
+            console.log("Checkout button not found on cart page");
+        }
+    }, 3000);
+}
 
 function clickPreferredShippingOption(context = "any") {
     const shippingOption =
@@ -451,9 +880,21 @@ function clickPreferredShippingOption(context = "any") {
             setRadioChecked(shippingInput);
         }
     } else {
+        const shippingLabel = getPdpShippingLabel();
+        const shippingRadio = shippingLabel?.closest('[role="radio"]') || shippingOption;
+
+        if (shippingRadio && shippingRadio !== shippingOption) {
+            clickElement(shippingRadio);
+            activateRadioElement(shippingRadio);
+        }
+
+        if (shippingLabel) {
+            clickElement(shippingLabel);
+        }
+
         clickElement(shippingOption);
 
-        const labelFor = shippingOption.getAttribute("for");
+        const labelFor = shippingLabel?.getAttribute("for") || shippingOption.getAttribute("for");
         if (labelFor) {
             const linkedInput = document.getElementById(labelFor);
             if (linkedInput && typeof linkedInput.click === "function") {
@@ -461,7 +902,9 @@ function clickPreferredShippingOption(context = "any") {
             }
         }
 
-        const nestedInput = shippingOption.querySelector?.("input[type='radio']");
+        const nestedInput =
+            shippingLabel?.querySelector?.("input[type='radio']") ||
+            shippingOption.querySelector?.("input[type='radio']");
         if (nestedInput && typeof nestedInput.click === "function") {
             nestedInput.click();
         }
@@ -471,41 +914,51 @@ function clickPreferredShippingOption(context = "any") {
 }
 
 function ensureShippingSelected(context, onComplete, attempt = 1) {
-    const selected = context === "cart" ? isCartShippingSelected() : isPdpShippingSelected();
-    if (selected) {
-        console.log("Shipping already selected on", context);
-        onComplete?.(true);
-        return;
-    }
+    const maxAttempts = context === "pdp" ? 2 : 10;
 
-    const clicked = clickPreferredShippingOption(context);
-    if (!clicked) {
-        if (attempt < 10) {
-            setTimeout(function() {
-                ensureShippingSelected(context, onComplete, attempt + 1);
-            }, 500);
-        } else {
-            onComplete?.(false);
-        }
-        return;
-    }
-
-    setTimeout(function() {
-        const afterClickSelected = context === "cart" ? isCartShippingSelected() : isPdpShippingSelected();
-        if (afterClickSelected) {
-            console.log("Shipping selected on", context);
+    try {
+        const selected = context === "cart" ? isCartShippingSelected() : isPdpShippingSelected();
+        if (selected) {
+            console.log("Shipping already selected on", context);
             onComplete?.(true);
             return;
         }
 
-        if (attempt < 10) {
-            ensureShippingSelected(context, onComplete, attempt + 1);
+        const clicked = clickPreferredShippingOption(context);
+        if (!clicked) {
+            console.log("Shipping option click failed on", context, "attempt", attempt);
+            if (attempt < maxAttempts) {
+                setTimeout(function() {
+                    ensureShippingSelected(context, onComplete, attempt + 1);
+                }, 500);
+            } else {
+                onComplete?.(false);
+            }
             return;
         }
 
-        console.log("Unable to verify shipping selection on", context);
+        setTimeout(function() {
+            const afterClickSelected = context === "cart" ? isCartShippingSelected() : isPdpShippingSelected();
+            if (afterClickSelected) {
+                console.log("Shipping selected on", context);
+                onComplete?.(true);
+                return;
+            }
+
+            console.log("Shipping not selected on", context, "after attempt", attempt);
+
+            if (attempt < maxAttempts) {
+                ensureShippingSelected(context, onComplete, attempt + 1);
+                return;
+            }
+
+            console.log("Unable to verify shipping selection on", context);
+            onComplete?.(false);
+        }, 500);
+    } catch (error) {
+        console.error("ensureShippingSelected failed on", context, error);
         onComplete?.(false);
-    }, 500);
+    }
 }
 
 function waitForAddToCartAndClick(attempt = 1) {
@@ -544,8 +997,70 @@ function waitForAddToCartAndClick(attempt = 1) {
 
     addToCartButton.scrollIntoView({ behavior: "smooth", block: "center" });
     console.log("Clicking Add to Cart");
-    playSound("addToCartClicked", `addToCartClicked:${sku || location.pathname}`);
-    addToCartButton.click();
+    setTimeout(function() {
+        monitorPostAddToCart();
+    }, 800);
+    clickElement(addToCartButton);
+}
+
+function transitionToCartAfterAdd(element, sourceLabel) {
+    console.log(`Post-ATC success detected via ${sourceLabel}. Waiting 1500ms before leaving PDP.`);
+    setTimeout(function() {
+        if (location.href.includes("www.bestbuy.com/cart")) {
+            cartpageoperationsEvenHandler();
+            return;
+        }
+
+        if (element) {
+            clickElement(element);
+        }
+    }, 1500);
+}
+
+function monitorPostAddToCart(attempt = 1) {
+    if (location.href.includes("www.bestbuy.com/cart")) {
+        console.log("Cart page reached after Add to Cart");
+        playSound("addToCartClicked", `addToCartClicked:${sku || location.pathname}`);
+        transitionToCartAfterAdd(null, "cart page");
+        return;
+    }
+
+    const gotoCartButton = getGoToCartButton();
+    if (gotoCartButton) {
+        console.log("Go to Cart detected after Add to Cart");
+        playSound("addToCartClicked", `addToCartClicked:${sku || location.pathname}`);
+        transitionToCartAfterAdd(gotoCartButton, "go to cart button");
+        return;
+    }
+
+    const purchaseButton = getAddToCartButton();
+    const buttonText = (purchaseButton?.textContent || "").trim().toLowerCase();
+    const isBusy = purchaseButton?.getAttribute("aria-busy") === "true";
+
+    console.log("Post-ATC state:", buttonText || "(empty)", "busy:", Boolean(isBusy), "attempt:", attempt);
+
+    if (buttonText.includes("please wait") || buttonText.includes("wait in line")) {
+        console.log("Queue state detected after Add to Cart");
+        playSound("addToCartClicked", `addToCartClicked:${sku || location.pathname}`);
+        instockEventHandler();
+        return;
+    }
+
+    if (buttonText.includes("go to cart")) {
+        console.log("Purchase button changed to Go to Cart");
+        playSound("addToCartClicked", `addToCartClicked:${sku || location.pathname}`);
+        transitionToCartAfterAdd(purchaseButton, "purchase button");
+        return;
+    }
+
+    if (attempt < 30) {
+        setTimeout(function() {
+            monitorPostAddToCart(attempt + 1);
+        }, 500);
+        return;
+    }
+
+    console.log("Timed out waiting for post-Add-to-Cart state after a single click");
 }
 
 function getCheckoutButton() {
@@ -571,12 +1086,15 @@ function isVisible(element) {
 }
 
 function setBadgeStatus(badge, mode, status) {
-    const textNodes = badge.querySelectorAll("p");
-    if (textNodes[1]) {
-        textNodes[1].innerText = mode;
+    const modeNode = badge.querySelector("[data-bot-mode]");
+    const statusNode = badge.querySelector("[data-bot-status]");
+
+    if (modeNode) {
+        modeNode.innerText = mode;
     }
-    if (textNodes[2]) {
-        textNodes[2].innerText = status;
+
+    if (statusNode) {
+        statusNode.innerText = status;
     }
 }
 
@@ -585,7 +1103,52 @@ function setBadgeColor(badge, color) {
         return;
     }
 
-    badge.style.background = color;
+    const accentNode = badge.querySelector("[data-bot-accent]");
+    const statusNode = badge.querySelector("[data-bot-status]");
+    const borderColor = color === "#991b1b" ? "rgba(248, 113, 113, 0.45)" : "rgba(255, 255, 255, 0.1)";
+
+    badge.style.borderColor = borderColor;
+    badge.style.boxShadow = `0 18px 40px ${color}33`;
+
+    if (accentNode) {
+        accentNode.style.background = color;
+    }
+
+    if (statusNode) {
+        statusNode.style.color = color === "#000000" ? "#f5f5f5" : "#ffffff";
+    }
+}
+
+let badgeCountdownTimer = null;
+
+function clearBadgeCountdown() {
+    if (badgeCountdownTimer) {
+        clearInterval(badgeCountdownTimer);
+        badgeCountdownTimer = null;
+    }
+}
+
+function startBadgeRefreshCountdown(badge, status, seconds) {
+    clearBadgeCountdown();
+
+    let remainingSeconds = seconds;
+    setBadgeStatus(badge, `Refresh in ${remainingSeconds}s`, status);
+
+    badgeCountdownTimer = setInterval(function() {
+        remainingSeconds -= 1;
+
+        if (remainingSeconds <= 0) {
+            clearBadgeCountdown();
+            setBadgeStatus(badge, "Refreshing now", status);
+            return;
+        }
+
+        setBadgeStatus(badge, `Refresh in ${remainingSeconds}s`, status);
+    }, 1000);
+}
+
+function refreshCurrentPageInPlace() {
+    window.location.reload();
 }
 
 function getPdpSoldOutButton() {
@@ -609,11 +1172,15 @@ function runPdpFlow(badge, attempt = 1) {
             const soldOutText = (soldOutButton.textContent || "").trim().toUpperCase();
             console.log("PDP sold out button:", soldOutText);
             setBadgeColor(badge, "#991b1b");
-            setBadgeStatus(badge, "Auto Detecting Mode", soldOutText || "SOLD OUT");
+            startBadgeRefreshCountdown(badge, soldOutText || "SOLD OUT", OOS_REFRESH);
+            setTimeout(function() {
+                refreshCurrentPageInPlace();
+            }, OOS_REFRESH * 1000);
             return;
         }
 
         console.log("No purchase button found on PDP, attempt", attempt);
+        clearBadgeCountdown();
         setBadgeColor(badge, "#000000");
         setBadgeStatus(badge, "Auto Detecting Mode", "Waiting for purchase controls");
         if (attempt < 45) {
@@ -629,25 +1196,26 @@ function runPdpFlow(badge, attempt = 1) {
 
     if (buttonText.includes("sold out") || buttonText.includes("coming soon")) {
         setBadgeColor(badge, "#991b1b");
-        setBadgeStatus(badge, "Auto Detecting Mode", buttonText.toUpperCase());
+        startBadgeRefreshCountdown(badge, buttonText.toUpperCase(), OOS_REFRESH);
         console.log('Out of Stock Button is Found: Just Refreshing !');
         setTimeout(function() {
-            window.open(window.location.href, '_blank');
-            window.close();
+            refreshCurrentPageInPlace();
         }, OOS_REFRESH * 1000);
         return;
     }
 
     if (buttonText.includes("add to cart")) {
+        clearBadgeCountdown();
         setBadgeColor(badge, "#15803d");
-        setBadgeStatus(badge, "Auto Detecting Mode", "Selecting shipping then adding to cart");
+        setBadgeStatus(badge, "Auto Detecting Mode", "Adding to cart");
         playSound("stockDetected", `stockDetected:${sku || location.pathname}`);
-        console.log("Selecting shipping, then Add to Cart");
+        console.log("Proceeding to Add to Cart");
         clickShippingThenAddToCart();
         return;
     }
 
     if (buttonText.includes("please wait") || buttonText.includes("wait in line")) {
+        clearBadgeCountdown();
         setBadgeColor(badge, "#b45309");
         setBadgeStatus(badge, "Auto Detecting Mode", "Queue state detected");
         console.log("Queue state detected on PDP");
@@ -655,6 +1223,7 @@ function runPdpFlow(badge, attempt = 1) {
         return;
     }
 
+    clearBadgeCountdown();
     setBadgeColor(badge, "#000000");
     setBadgeStatus(badge, "Auto Detecting Mode", "Unhandled purchase state");
     console.log("Unhandled PDP purchase state:", buttonText);
@@ -687,43 +1256,104 @@ function runPdpFlow(badge, attempt = 1) {
  //________________________________________________________________________
  
 function createFloatingBadge(mode,status) {
- 
-     const iconUrl = BOT_ICON_URL;
-     const $container = document.createElement("div");
-     const $bg = document.createElement("div");
-     const $link = document.createElement("a");
-     const $img = document.createElement("img");
-     const $text = document.createElement("P");
-     const $mode = document.createElement("P");
-     const $status1 = document.createElement("P");
- 
- 
-     $link.setAttribute("href", "https://github.com/alexh/best-buy-bot");
-     $link.setAttribute("target", "_blank");
-     $link.setAttribute("title", "alexh/best-buy-bot");
-     $img.setAttribute("src", iconUrl);
-     var MAIN_TITLE = (" alexh/best-buy-bot v5.0 | ◻️TESTMODE: " + TESTMODE + "◻️ITEM KEYWORD: " + ITEM_KEYWORD + "◻️OOS REFRESH: " + OOS_REFRESH);
-     $text.innerText = MAIN_TITLE;
-     $mode.innerText = mode;
-     $status1.innerText = status;
- 
-     $container.style.cssText = "position:fixed;left:0;bottom:0;width:850px;height:75px;background: black;";
-     $bg.style.cssText = "position:absolute;left:-100%;top:0;width:60px;height:55px;background:#1111;box-shadow: 0px 0 10px #060303; border: 1px solid #FFF;";
-     $link.style.cssText = "position:absolute;display:block;top:11px;left: 0px; z-index:10;width: 50px;height:50px;border-radius: 1px;overflow:hidden;";
-     $img.style.cssText = "display:block;width:100%";
-     $text.style.cssText = "position:absolute;display:block;top:3px;left: 50px;background: transperant; color: white;";
-     $mode.style.cssText = "position:absolute;display:block;top:22px;left: 50px;background: transperant; color: white;";
-     $status1.style.cssText = "position:absolute;display:block;top:43px;left: 50px;background: transperant; color: white;";
- 
- 
-     $link.appendChild($img);
-     $container.appendChild($bg);
-     $container.appendChild($link);
-     $container.appendChild($text);
-     $container.appendChild($mode);
-     $container.appendChild($status1)
- 
-     return $container;
+    const existingBadge = document.getElementById("best-buy-bot-badge");
+    if (existingBadge) {
+        setBadgeStatus(existingBadge, mode, status);
+        return existingBadge;
+    }
+
+    const iconUrl = BOT_ICON_URL;
+    const $container = document.createElement("div");
+    const $header = document.createElement("div");
+    const $link = document.createElement("a");
+    const $img = document.createElement("img");
+    const $titleWrap = document.createElement("div");
+    const $title = document.createElement("div");
+    const $meta = document.createElement("div");
+    const $testMode = document.createElement("div");
+    const $content = document.createElement("div");
+    const $accent = document.createElement("div");
+    const $body = document.createElement("div");
+    const $mode = document.createElement("div");
+    const $status = document.createElement("div");
+
+    $container.id = "best-buy-bot-badge";
+    $container.style.cssText = [
+        "position:fixed",
+        "left:50%",
+        "bottom:20px",
+        "transform:translateX(-50%)",
+        "width:560px",
+        "max-width:calc(100vw - 32px)",
+        "padding:16px 18px 16px",
+        "border:1px solid rgba(255, 255, 255, 0.1)",
+        "border-radius:18px",
+        "background:rgba(10, 10, 10, 0.9)",
+        "backdrop-filter:blur(14px)",
+        "-webkit-backdrop-filter:blur(14px)",
+        "box-shadow:0 18px 40px rgba(0, 0, 0, 0.32)",
+        "color:#f5f5f5",
+        "font-family:ui-sans-serif, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif",
+        "z-index:2147483647"
+    ].join(";");
+
+    $link.setAttribute("href", "https://github.com/alexh/best-buy-bot");
+    $link.setAttribute("target", "_blank");
+    $link.setAttribute("title", "alexh/best-buy-bot");
+    $link.style.cssText = [
+        "display:flex",
+        "align-items:center",
+        "justify-content:center",
+        "width:40px",
+        "height:40px",
+        "padding:5px",
+        "box-sizing:border-box",
+        "border-radius:10px",
+        "flex-shrink:0",
+        "background:rgba(255, 255, 255, 0.04)"
+    ].join(";");
+
+    $img.setAttribute("src", iconUrl);
+    $img.setAttribute("alt", "Best Buy bot");
+    $img.style.cssText = "display:block;width:100%;height:100%;object-fit:contain;";
+
+    $header.style.cssText = "display:flex;align-items:flex-start;justify-content:space-between;gap:16px;";
+    $titleWrap.style.cssText = "display:flex;flex-direction:column;gap:6px;min-width:0;flex:1;";
+    $title.style.cssText = "font-size:14px;font-weight:700;letter-spacing:0.02em;color:#ffffff;line-height:1.2;";
+    $meta.style.cssText = "font-size:12px;line-height:1.45;color:rgba(255,255,255,0.62);white-space:normal;";
+    $testMode.setAttribute("data-bot-testmode", "true");
+    $testMode.style.cssText = "display:flex;align-items:center;justify-content:center;min-width:120px;padding:10px 14px;border-radius:12px;font-size:16px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:#111827;background:#fbbf24;flex-shrink:0;";
+    $content.style.cssText = "display:flex;gap:12px;margin-top:14px;align-items:stretch;";
+    $accent.setAttribute("data-bot-accent", "true");
+    $accent.style.cssText = "width:5px;border-radius:999px;background:#0f172a;flex-shrink:0;";
+    $body.style.cssText = "display:flex;flex-direction:column;gap:6px;min-width:0;";
+    $mode.setAttribute("data-bot-mode", "true");
+    $mode.style.cssText = "font-size:12px;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.58);";
+    $status.setAttribute("data-bot-status", "true");
+    $status.style.cssText = "font-size:24px;font-weight:700;line-height:1.15;color:#ffffff;word-break:break-word;";
+
+    $title.innerText = "alexh/best-buy-bot";
+    $meta.innerText = `v5.0  KEYWORD ${REQUIRED_KEYWORDS.join(" + ") || ITEM_KEYWORD}  REFRESH ${OOS_REFRESH}s`;
+    $testMode.innerText = TESTMODE === "Yes" ? "TEST MODE" : "LIVE MODE";
+    $testMode.style.background = TESTMODE === "Yes" ? "#fbbf24" : "#ef4444";
+    $testMode.style.color = TESTMODE === "Yes" ? "#111827" : "#ffffff";
+    $mode.innerText = mode;
+    $status.innerText = status;
+
+    $link.appendChild($img);
+    $titleWrap.appendChild($title);
+    $titleWrap.appendChild($meta);
+    $header.appendChild($link);
+    $header.appendChild($titleWrap);
+    $header.appendChild($testMode);
+    $body.appendChild($mode);
+    $body.appendChild($status);
+    $content.appendChild($accent);
+    $content.appendChild($body);
+    $container.appendChild($header);
+    $container.appendChild($content);
+
+    return $container;
  }
  
  //________________________________________________________________________
@@ -737,21 +1367,28 @@ function createFloatingBadge(mode,status) {
  //    CART PAGE EventHandler
  //________________________________________________________________________
  
- function cartpageoperationsEvenHandler(evt) {
-     setTimeout(() => {
-         if (location.href.includes("www.bestbuy.com/cart")) {
-             // Create and display the badge
-             const $badge = createFloatingBadge(
+function cartpageoperationsEvenHandler(evt) {
+    setTimeout(() => {
+        if (location.href.includes("www.bestbuy.com/cart")) {
+            ensureSku();
+            // Create and display the badge
+            const $badge = createFloatingBadge(
                  "Cart Page 🛑 Do Not Refresh. Only one item can be carted per account.",
                  "Verfying that first item in CART has KEYWORD"
              );
-             document.body.appendChild($badge);
-             $badge.style.transform = "translate(0, 0)";
- 
-             // Wait 3 seconds on Cart Page
-             setTimeout(() => {
-                const CartItemCheck = document.getElementsByClassName("cart-item__title focus-item-0");
-                if (CartItemCheck[0] && CartItemCheck[0].innerHTML.includes(ITEM_KEYWORD)) {
+            document.body.appendChild($badge);
+
+            // Wait 3 seconds on Cart Page
+            setTimeout(() => {
+                if (!isCartCleanForCheckout()) {
+                    console.log("Cart is not clean. Checkout automation requires exactly one matching item in cart.");
+                    setBadgeColor($badge, "#991b1b");
+                    setBadgeStatus($badge, "Cart not clean", "Keep only the target item in cart");
+                    return;
+                }
+
+                const cartItemTitle = getTargetCartTitleElement();
+                if (cartItemTitle && matchesRequiredKeywords(cartItemTitle.innerHTML)) {
                    console.log("Item Has been Confirmed!");
                    playSound("cartConfirmed", `cartConfirmed:${sku || location.pathname}`);
  
@@ -762,31 +1399,20 @@ function createFloatingBadge(mode,status) {
                                 console.log("Shipping selection attempted. Waiting before checkout.", selected);
 
                                 if (!selected) {
-                                    console.log("Shipping was not selected on cart page. Skipping checkout click.");
+                                    console.log("Shipping was not selected on cart page. Proceeding with the current fulfillment.");
+                                    proceedToCheckoutFromCart();
                                     return;
                                 }
 
                                 fillAndApplyShippingAddress(function(applied) {
                                     console.log("Shipping address apply attempted.", applied);
-
-                                    setTimeout(() => {
-                                        const checkoutButton = getCheckoutButton();
-                                        if (checkoutButton) {
-                                            console.log("Clicking Checkout");
-                                            checkoutButton.click();
-                                        } else {
-                                            console.log("Checkout button not found after shipping selection");
-                                        }
-                                    }, 3000);
+                                    proceedToCheckoutFromCart();
                                 });
                             });
                         }, 3000);
                     } else {
                         console.log("Shipping button not found. Clicking Checkout immediately.");
-                        const checkoutButton = getCheckoutButton();
-                        if (checkoutButton) {
-                            checkoutButton.click();
-                        }
+                        proceedToCheckoutFromCart();
                     }
                 }
              }, 3000);
@@ -807,10 +1433,9 @@ function verificationpageEventHandler (evt) {
          if (location.href.indexOf("identity/signin/recoveryOptions") > -1) {
              //Create Custom Badge
              //
-             const $badge = createFloatingBadge("Get Ready To Verify 🛑 Do Not Refresh ","Validating and Entering SMS Digits | It will error if you havent updated SMS_DIGITS ");
-             document.body.appendChild($badge);
-             $badge.style.transform = "translate(0, 0)"
-             setTimeout(function()
+                 const $badge = createFloatingBadge("Get Ready To Verify 🛑 Do Not Refresh ","Validating and Entering SMS Digits | It will error if you havent updated SMS_DIGITS ");
+                 document.body.appendChild($badge);
+                 setTimeout(function()
                         {
                  var ContinueButton;
                  const ContinueButton_L1 = "btn btn-secondary btn-lg btn-block c-button-icon c-button-icon-leading cia-form__controls__submit "
@@ -902,11 +1527,10 @@ function instockEventHandler(evt) {
                          // run checkQueueTimeRemaining Function which returns [remainingMin, remainingSec]
                          const [remainingMin, remainingSec] = checkQueueTimeRemaining();
                          //DEBUG//console.log(remainingMin,'m : ', remainingSec,'s')
-                         const queueBadge = 'Queue Time : ' + remainingMin + 'm : '+ remainingSec+'s'
-                         const $badge = createFloatingBadge(MODE,queueBadge);
-                         document.body.appendChild($badge);
-                         $badge.style.transform = "translate(0, 0)"
-                         // Run this every 20 seconds
+                                                 const queueBadge = 'Queue Time : ' + remainingMin + 'm : '+ remainingSec+'s'
+                                                 const $badge = createFloatingBadge(MODE,queueBadge);
+                                                 document.body.appendChild($badge);
+                                                 // Run this every 20 seconds
                          setTimeout(function() {
  
                             //Find the Color of Main Button in Firefox
@@ -1096,17 +1720,8 @@ function instockEventHandler(evt) {
  //  Main Code
  //________________________________________________________________________
  
- function contains(a,b) {
-     let counter = 0;
-     for(var i = 0; i < b.length; i++) {;
-                                        if(a.includes(b[i])) counter++;
-                                       }
-     if(counter === b.length) return true;
-     return false;
- }
- 
- // Get Page Title
- var pagetitle = String(document.title);
+// Get Page Title
+var pagetitle = String(document.title);
  
  if (location.href.includes("www.bestbuy.com/cart")) {
  
@@ -1132,7 +1747,7 @@ function instockEventHandler(evt) {
  
  }
  
- if (pagetitle.includes(ITEM_KEYWORD)) {
+if (matchesRequiredKeywords(pagetitle)) {
  
  
      //Create Custom Badge
@@ -1140,7 +1755,6 @@ function instockEventHandler(evt) {
     const $badge = createFloatingBadge("Auto Detecting Mode", "Initializing ..");
     console.log('BEGIN ')
     document.body.appendChild($badge);
-    $badge.style.transform = "translate(0, 0)"
     runPdpFlow($badge);
 }
  
@@ -1152,7 +1766,6 @@ function instockEventHandler(evt) {
      //
      const $badge = createFloatingBadge("Final CheckPoint","Verifying and Submitting");
      document.body.appendChild($badge);
-     $badge.style.transform = "translate(0, 0)"
      //
      //
      setTimeout(function() {
@@ -1169,7 +1782,7 @@ function instockEventHandler(evt) {
          //console.log(CartItemCheck[0])
          //
          //
-        if (CartItemCheck[0].innerHTML.includes(ITEM_KEYWORD)){
+        if (CartItemCheck[0] && matchesRequiredKeywords(CartItemCheck[0].innerHTML)){
             //
             console.log('Item Has been Confirmed !')
             playSound("checkoutPageReady", `checkoutPageReady:${sku || location.pathname}`);
@@ -1236,17 +1849,24 @@ function instockEventHandler(evt) {
  
  
  }
+ else if (location.href.includes("www.bestbuy.com/checkout/r/fulfillment") || location.href.includes("www.bestbuy.com/checkout/c/fulfillment")) {
+
+     const $badge = createFloatingBadge("Fulfillment Checkpoint","Applying shipping details");
+     document.body.appendChild($badge);
+
+     setTimeout(function(){
+         runFulfillmentCheckoutFlow();
+     }, 3000);
+
+ }
  // SIGN IN OPERATIONS
  else if (location.href.includes("www.bestbuy.com/identity/signin")) {
- 
+
      const $badge = createFloatingBadge("Sign-In Page Detected | Please have your credentials saved ","Clicking Sign-In in 5 Seconds");
      document.body.appendChild($badge);
-     $badge.style.transform = "translate(0, 0)"
  
      setTimeout(function(){
- 
-         var signInButton = document.getElementsByClassName("c-button c-button-secondary c-button-lg c-button-block c-button-icon c-button-icon-leading cia-form__controls__submit")[0];
-         signInButton.click()
+         runSignInFlow();
  
          //
          //
