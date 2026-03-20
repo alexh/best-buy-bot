@@ -276,7 +276,7 @@ function getTargetCartItemContainer() {
 }
 
 function getCartLineItems() {
-    return Array.from(document.querySelectorAll("section.card[data-test-sku]"));
+    return Array.from(document.querySelectorAll("section.card[data-test-sku], .fluid-item[data-test-sku]"));
 }
 
 function getMatchingCartLineItems() {
@@ -427,13 +427,6 @@ function clickElement(element) {
         }
     });
 
-    try {
-        if (typeof element.click === "function") {
-            element.click();
-        }
-    } catch (error) {
-        console.warn("element.click failed", error);
-    }
 }
 
 function activateRadioElement(element) {
@@ -603,6 +596,11 @@ function selectPasswordSignInMethod() {
 }
 
 function fillPasswordAndContinue() {
+    if (!BEST_BUY_PASSWORD || BEST_BUY_PASSWORD === "REPLACE_IN_LOCAL_ENV") {
+        console.log("BEST_BUY_PASSWORD is not configured. Leaving sign-in to manual or saved credentials.");
+        return false;
+    }
+
     const passwordInput = getPasswordInput();
     if (!passwordInput) {
         console.log("Password input not found on sign-in page");
@@ -623,11 +621,13 @@ function fillPasswordAndContinue() {
 }
 
 function runSignInFlow(attempt = 1) {
-    if (fillPasswordAndContinue()) {
+    const canAutofillPassword = BEST_BUY_PASSWORD && BEST_BUY_PASSWORD !== "REPLACE_IN_LOCAL_ENV";
+
+    if (canAutofillPassword && fillPasswordAndContinue()) {
         return;
     }
 
-    if (selectPasswordSignInMethod()) {
+    if (canAutofillPassword && selectPasswordSignInMethod()) {
         if (attempt < 12) {
             setTimeout(function() {
                 runSignInFlow(attempt + 1);
