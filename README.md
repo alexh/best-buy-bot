@@ -1,5 +1,7 @@
 # Best Buy Bot Tampermonkey Fork
 
+![Best Buy Bot banner](./assets/images/banner.gif)
+
 This repo is a maintained fork of the original Best Buy GPU bot userscript. It keeps the distribution model simple: one Tampermonkey script at the repo root, plus versioned assets for audio and imagery.
 
 Original repo: [kkapuria3/BestBuy-GPU-Bot](https://github.com/kkapuria3/BestBuy-GPU-Bot)  
@@ -27,7 +29,7 @@ Fork repo: [alexh/best-buy-bot](https://github.com/alexh/best-buy-bot)
 Edit the constants at the top of `best-buy-tm.js`:
 
 ```js
-const ITEM_KEYWORD = "5090";
+const ITEM_KEYWORD = "ASUS,5090";
 const CREDITCARD_CVV = "***";
 const TESTMODE = "Yes";
 const SMS_DIGITS = "1111";
@@ -46,7 +48,9 @@ const SOUND_ENABLED = "Yes";
 
 Guidance:
 
-- `ITEM_KEYWORD` must match the product title you expect the script to act on.
+- `ITEM_KEYWORD` supports a single term or a comma-separated list. Every term must appear in the product title before the script acts.
+- Example: `ITEM_KEYWORD = "ASUS,5090"` matches titles that contain both `ASUS` and `5090`.
+- Spaces around commas are allowed. Matching is case-insensitive.
 - `TESTMODE = "Yes"` performs the flow up to the final user confirmation point without placing the order.
 - `PREFERRED_SHIPPING = "Yes"` makes the script try to switch fulfillment from pickup to shipping before checkout.
 - Shipping constants are used to fill the Best Buy shipping address form when that form appears.
@@ -68,6 +72,7 @@ The sold-out state is visual only. The badge turns red and reads `SOLD OUT`, but
 
 - The installable script is the root-level `best-buy-tm.js`.
 - The script is designed around the real PDP purchase module for the current SKU. It should not act on recommended-item buttons.
+- Cart automation expects a clean cart. Keep only the target item in cart before letting the script continue to shipping selection and checkout.
 - Audio clips are loaded from the fork’s raw GitHub asset URLs under `assets/audio/`.
 - If Best Buy changes markup again, selectors around fulfillment and checkout may need another update.
 
