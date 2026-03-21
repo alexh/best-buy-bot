@@ -63,7 +63,7 @@ const OOS_DECOY_AWAY_MAX = 30   // (in Seconds) Max time to spend on decoy page.
  
 const playedSoundGuards = new Set();
 let activeAudio = null;
-let consecutiveOosCount = 0;
+let consecutiveOosCount = parseInt(sessionStorage.getItem("bbbot_oos_count") || "0", 10);
 const REQUIRED_KEYWORDS = String(ITEM_KEYWORD)
     .split(",")
     .map((keyword) => keyword.trim().toLowerCase())
@@ -1184,6 +1184,7 @@ function doDecoyTrip(targetUrl) {
 // Centralised OOS refresh handler — applies jitter and decoy-trip logic.
 function handleOosRefresh(badge, statusText) {
     consecutiveOosCount++;
+    sessionStorage.setItem("bbbot_oos_count", consecutiveOosCount);
     const delay = jitteredOosDelay();
     const delaySec = Math.round(delay / 1000);
 
@@ -1191,6 +1192,7 @@ function handleOosRefresh(badge, statusText) {
 
     if (consecutiveOosCount >= OOS_DECOY_THRESHOLD) {
         consecutiveOosCount = 0;
+        sessionStorage.removeItem("bbbot_oos_count");
         console.log("[bot-evasion] Decoy threshold reached, scheduling decoy trip after", delaySec, "s");
         setTimeout(function() { doDecoyTrip(location.href); }, delay);
     } else {
@@ -1290,6 +1292,7 @@ function runPdpFlow(badge, attempt = 1) {
 
     if (buttonText.includes("add to cart")) {
         consecutiveOosCount = 0;
+        sessionStorage.removeItem("bbbot_oos_count");
         clearBadgeCountdown();
         setBadgeColor(badge, "#15803d");
         setBadgeStatus(badge, "Auto Detecting Mode", "Adding to cart");
