@@ -20,7 +20,7 @@
  
 const ITEM_KEYWORD= "5090"; // Comma-separated keywords, every term must match. Example: "ASUS,5090"
 const CREDITCARD_CVV = "***"; // BOT will run without changing this value.
-const BEST_BUY_PASSWORD = "REPLACE_IN_LOCAL_ENV";
+const BEST_BUY_PASSWORD = "REPLACE_WITH_BB_PASSWORD";
 const TESTMODE = "Yes"; // TESTMODE = "No" will buy the card
 const SMS_DIGITS = "1111"; // Enter last 4 digits of phone # for SMS verification (required for verification)
 const PREFERRED_SHIPPING = "Yes" // "Yes" will select shipping option if available
@@ -46,7 +46,11 @@ const SOUND_FILES = {
  
  //const QUEUE_TIME_CUTOFF = 0 // (in Minutes) Keep retrying until queue time is below.
  //onst NEW_QUEUE_TIME_DELAY = 5 // (in Seconds) Ask new queue time set seconds
- const OOS_REFRESH = 10 // (in Seconds) Refresh rate on OOS item.
+ const OOS_REFRESH = 10          // (in Seconds) Base refresh rate on OOS item.
+const OOS_JITTER_MAX = 5        // (in Seconds) Max random extra delay added to each refresh.
+const OOS_DECOY_THRESHOLD = 5   // Consecutive OOS hits before taking a decoy browse trip.
+const OOS_DECOY_AWAY_MIN = 15   // (in Seconds) Min time to spend on decoy page.
+const OOS_DECOY_AWAY_MAX = 30   // (in Seconds) Max time to spend on decoy page.
  
  //____ LAZY FLAGS : WILL NOT AFFECT BOT PERFORMACE _____________________
  
@@ -59,6 +63,7 @@ const SOUND_FILES = {
  
 const playedSoundGuards = new Set();
 let activeAudio = null;
+let consecutiveOosCount = 0;
 const REQUIRED_KEYWORDS = String(ITEM_KEYWORD)
     .split(",")
     .map((keyword) => keyword.trim().toLowerCase())
@@ -1151,6 +1156,91 @@ function refreshCurrentPageInPlace() {
     window.location.reload();
 }
 
+// Returns a jittered OOS delay in ms (OOS_REFRESH + 0..OOS_JITTER_MAX seconds).
+function jitteredOosDelay() {
+    return (OOS_REFRESH + Math.random() * OOS_JITTER_MAX) * 1000;
+}
+
+// Decoy page URLs — innocuous Best Buy browse/category pages.
+const DECOY_URLS = [
+    "https://www.bestbuy.com/",
+    "https://www.bestbuy.com/site/computers-pcs/laptop-computers/abcat0502000.c",
+    "https://www.bestbuy.com/site/tvs/all-flat-screen-tvs/abcat0101001.c",
+    "https://www.bestbuy.com/site/video-games/abcat0700000.c",
+    "https://www.bestbuy.com/site/cell-phones/all-cell-phones/abcat0800000.c",
+    "https://www.bestbuy.com/site/sale/todays-deals-pcmcat1563299784494.c",
+    "https://www.bestbuy.com/site/headphones/abcat0204000.c",
+    "https://www.bestbuy.com/site/cameras-camcorders/abcat0400000.c",
+];
+
+// Navigate to a random decoy page, stash the target URL so we can return.
+function doDecoyTrip(targetUrl) {
+    const decoyUrl = DECOY_URLS[Math.floor(Math.random() * DECOY_URLS.length)];
+    console.log("[bot-evasion] Starting decoy trip →", decoyUrl, "| will return to", targetUrl);
+    sessionStorage.setItem("bbbot_decoy_target", targetUrl);
+    location.href = decoyUrl;
+}
+
+// Centralised OOS refresh handler — applies jitter and decoy-trip logic.
+function handleOosRefresh(badge, statusText) {
+    consecutiveOosCount++;
+    const delay = jitteredOosDelay();
+    const delaySec = Math.round(delay / 1000);
+
+    startBadgeRefreshCountdown(badge, statusText, delaySec);
+
+    if (consecutiveOosCount >= OOS_DECOY_THRESHOLD) {
+        consecutiveOosCount = 0;
+        console.log("[bot-evasion] Decoy threshold reached, scheduling decoy trip after", delaySec, "s");
+        setTimeout(function() { doDecoyTrip(location.href); }, delay);
+    } else {
+        setTimeout(refreshCurrentPageInPlace, delay);
+    }
+}
+
+// Called when we land on a decoy page. Scrolls around randomly, then returns.
+// Dispatch a cluster of mousemove events along a jittered path, spread over durationMs.
+function simulateMouseWander(durationMs) {
+    const steps = 8 + Math.floor(Math.random() * 6);
+    // Pick a random anchor point to wander around so movements feel purposeful.
+    const anchorX = 100 + Math.random() * (window.innerWidth - 200);
+    const anchorY = 100 + Math.random() * (window.innerHeight - 200);
+    for (let i = 0; i < steps; i++) {
+        setTimeout(function() {
+            document.dispatchEvent(new MouseEvent("mousemove", {
+                clientX: anchorX + (Math.random() - 0.5) * 300,
+                clientY: anchorY + (Math.random() - 0.5) * 200,
+                bubbles: true,
+            }));
+        }, (durationMs / steps) * i + Math.random() * 80);
+    }
+}
+
+function runDecoyBehavior() {
+    const targetUrl = sessionStorage.getItem("bbbot_decoy_target");
+    sessionStorage.removeItem("bbbot_decoy_target");
+
+    const awayMs = (OOS_DECOY_AWAY_MIN + Math.random() * (OOS_DECOY_AWAY_MAX - OOS_DECOY_AWAY_MIN)) * 1000;
+    console.log("[bot-evasion] On decoy page. Returning to target in", Math.round(awayMs / 1000), "s");
+
+    // Interleave scroll bursts and mouse wander clusters across the away time.
+    const scrollSteps = 4;
+    for (let i = 1; i <= scrollSteps; i++) {
+        const t = (awayMs / (scrollSteps + 1)) * i;
+        setTimeout(function() {
+            const y = Math.floor(Math.random() * (document.body.scrollHeight || 2000));
+            window.scrollTo({ top: y, behavior: "smooth" });
+            // Wander the mouse around the same region as the scroll event.
+            simulateMouseWander(1500);
+        }, t);
+    }
+
+    setTimeout(function() {
+        console.log("[bot-evasion] Decoy trip done, returning to", targetUrl);
+        location.href = targetUrl;
+    }, awayMs);
+}
+
 function getPdpSoldOutButton() {
     const pdpAddToCartRoot = document.getElementById("a2c") || document.querySelector('[data-component-name="AddToCart"]');
     if (!pdpAddToCartRoot) {
@@ -1172,10 +1262,7 @@ function runPdpFlow(badge, attempt = 1) {
             const soldOutText = (soldOutButton.textContent || "").trim().toUpperCase();
             console.log("PDP sold out button:", soldOutText);
             setBadgeColor(badge, "#991b1b");
-            startBadgeRefreshCountdown(badge, soldOutText || "SOLD OUT", OOS_REFRESH);
-            setTimeout(function() {
-                refreshCurrentPageInPlace();
-            }, OOS_REFRESH * 1000);
+            handleOosRefresh(badge, soldOutText || "SOLD OUT");
             return;
         }
 
@@ -1196,15 +1283,13 @@ function runPdpFlow(badge, attempt = 1) {
 
     if (buttonText.includes("sold out") || buttonText.includes("coming soon")) {
         setBadgeColor(badge, "#991b1b");
-        startBadgeRefreshCountdown(badge, buttonText.toUpperCase(), OOS_REFRESH);
         console.log('Out of Stock Button is Found: Just Refreshing !');
-        setTimeout(function() {
-            refreshCurrentPageInPlace();
-        }, OOS_REFRESH * 1000);
+        handleOosRefresh(badge, buttonText.toUpperCase());
         return;
     }
 
     if (buttonText.includes("add to cart")) {
+        consecutiveOosCount = 0;
         clearBadgeCountdown();
         setBadgeColor(badge, "#15803d");
         setBadgeStatus(badge, "Auto Detecting Mode", "Adding to cart");
@@ -1747,9 +1832,12 @@ var pagetitle = String(document.title);
  
  }
  
-if (matchesRequiredKeywords(pagetitle)) {
- 
- 
+// Decoy trip detection: if we navigated here as part of an evasion trip, run
+// the scroll-and-return behavior instead of the normal PDP flow.
+if (sessionStorage.getItem("bbbot_decoy_target")) {
+    runDecoyBehavior();
+} else if (matchesRequiredKeywords(pagetitle)) {
+
      //Create Custom Badge
      //
     const $badge = createFloatingBadge("Auto Detecting Mode", "Initializing ..");
