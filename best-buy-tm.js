@@ -7,6 +7,13 @@
 // @description  Best Buy Tampermonkey automation fork
 // @author       alexh, forked from Karan Kapuria
 // @grant        window.close
+// @grant        GM_getResourceURL
+// @resource     snd_addToCartClicked    https://raw.githubusercontent.com/alexh/best-buy-bot/main/assets/audio/add-to-cart-clicked.mp3
+// @resource     snd_cartConfirmed       https://raw.githubusercontent.com/alexh/best-buy-bot/main/assets/audio/cart-confirmed.mp3
+// @resource     snd_checkoutPageReady   https://raw.githubusercontent.com/alexh/best-buy-bot/main/assets/audio/checkout-page-ready.mp3
+// @resource     snd_manualConfirmation  https://raw.githubusercontent.com/alexh/best-buy-bot/main/assets/audio/manual-confirmation-required.mp3
+// @resource     snd_stockDetected       https://raw.githubusercontent.com/alexh/best-buy-bot/main/assets/audio/stock-detected.mp3
+// @resource     img_botIcon             https://raw.githubusercontent.com/alexh/best-buy-bot/main/assets/images/bot-icon.png
 
 // ==/UserScript==
 
@@ -41,6 +48,27 @@ const SOUND_FILES = {
     manualConfirmationRequired: "manual-confirmation-required.mp3",
     stockDetected: "stock-detected.mp3"
 };
+
+// Maps sound event names and "botIcon" to their @resource keys.
+// GM_getResourceURL returns a local blob URL pre-fetched by Tampermonkey,
+// bypassing Brave Shields / content blockers that block raw.githubusercontent.com.
+const RESOURCE_KEYS = {
+    addToCartClicked: "snd_addToCartClicked",
+    cartConfirmed: "snd_cartConfirmed",
+    checkoutPageReady: "snd_checkoutPageReady",
+    manualConfirmationRequired: "snd_manualConfirmation",
+    stockDetected: "snd_stockDetected",
+    botIcon: "img_botIcon",
+};
+
+function getAssetUrl(key, fallbackUrl) {
+    try {
+        if (typeof GM_getResourceURL === "function") {
+            return GM_getResourceURL(RESOURCE_KEYS[key]) || fallbackUrl;
+        }
+    } catch (_) {}
+    return fallbackUrl;
+}
  
  //____ PLEASE WAIT FLAGS : ADVANCED OPTIONS _____________________________
  
@@ -102,7 +130,7 @@ function playSound(eventName, guardKey = "") {
         activeAudio = null;
     }
 
-    const audio = new Audio(`${SOUND_BASE_URL}/${soundFile}`);
+    const audio = new Audio(getAssetUrl(eventName, `${SOUND_BASE_URL}/${soundFile}`));
     activeAudio = audio;
     audio.addEventListener("ended", () => {
         if (activeAudio === audio) {
@@ -1223,7 +1251,24 @@ function runDecoyBehavior() {
     sessionStorage.removeItem("bbbot_decoy_target");
 
     const awayMs = (OOS_DECOY_AWAY_MIN + Math.random() * (OOS_DECOY_AWAY_MAX - OOS_DECOY_AWAY_MIN)) * 1000;
-    console.log("[bot-evasion] On decoy page. Returning to target in", Math.round(awayMs / 1000), "s");
+    const awaySec = Math.round(awayMs / 1000);
+    console.log("[bot-evasion] On decoy page. Returning to target in", awaySec, "s");
+
+    const $badge = createFloatingBadge("Evasion Mode", `Browsing decoy page — returning in ${awaySec}s`);
+    document.body.appendChild($badge);
+    setBadgeColor($badge, "#1e3a5f");
+
+    // Count down the badge so the user can see progress.
+    let remaining = awaySec;
+    const countdownTimer = setInterval(function() {
+        remaining -= 1;
+        if (remaining <= 0) {
+            clearInterval(countdownTimer);
+            setBadgeStatus($badge, "Evasion Mode", "Returning to target page…");
+        } else {
+            setBadgeStatus($badge, "Evasion Mode", `Browsing decoy page — returning in ${remaining}s`);
+        }
+    }, 1000);
 
     // Interleave scroll bursts and mouse wander clusters across the away time.
     const scrollSteps = 4;
@@ -1350,7 +1395,7 @@ function createFloatingBadge(mode,status) {
         return existingBadge;
     }
 
-    const iconUrl = BOT_ICON_URL;
+    const iconUrl = getAssetUrl("botIcon", BOT_ICON_URL);
     const $container = document.createElement("div");
     const $header = document.createElement("div");
     const $link = document.createElement("a");
